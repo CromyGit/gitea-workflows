@@ -1,0 +1,78 @@
+name: Upload Nuget Package
+
+on:
+  push:
+    branches-ignore: [ "main" ]
+    # Pattern matched against refs/tags
+    #tags:
+    #  - '*'     # Push events to every tag not containing /
+    
+env:
+  ENV_FILE: .github/config.env
+  VER_FILE: .github/version.env
+jobs:
+
+  init: 
+    runs-on: ubuntu-latest
+
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      # Laden der Variablen aus der Environment-Datei
+      - name: Load Environment-File
+        run: |
+          source $ENV_FILE
+          echo "App Name: $APP_NAME"
+          echo "Version: $VERSION"
+          echo "Solution_Name: $Solution_Name"
+          echo "CS_PROJECT_PATH: $CS_PROJECT_PATH"
+          echo "PROJECT_PATH: $PROJECT_PATH"
+          echo "Test_Project_Path: $Test_Project_Path"
+          echo "GITHUB_REF_NAME: ${{ github.ref_name }}"
+          echo "GITHUB_ACTION_PATH ${GITHUB_WORKSPACE}"
+          echo "GITHUB_ACTION_PATH ${{ github.workspace }}"                              
+    
+
+  build:
+    needs: init
+    strategy:
+      matrix:
+        configuration: [Release]
+
+    runs-on: ubuntu-dotnet  # For a list of available runner types, refer to
+                             # https://help.github.com/en/actions/reference/workflow-syntax-for-github-actions#jobsjob_idruns-on
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: add nuget source
+      run: dotnet nuget add source --name Shared -u ${{ secrets.API_USERNAME }} -p ${{ secrets.API_TOKEN }} ${{ secrets.API_SOURCE }} --store-password-in-clear-text
+
+    - name: Install dependencies
+      run: |
+        source $ENV_FILE
+        dotnet restore ./$CS_PROJECT_PATH                        
+
+    - name: Build
+      run: |
+        source $ENV_FILE
+        source $VER_FILE
+        dotnet pack ./$CS_PROJECT_PATH /p:Version=$VERSION-Preview-${{ github.run_id }}
+                                
+    - name: Test with the dotnet CLI
+      run: |
+        source $ENV_FILE
+        dotnet test ${{ github.workspace }}/$Solution_Name                        
+
+    - name: Publish
+      run: |
+        source $ENV_FILE
+        source $VER_FILE
+        dotnet nuget push -s ${{ secrets.API_SOURCE }} ${{ github.workspace }}/$PROJECT_PATH/bin/Release/$APP_NAME.$VERSION-Preview-${{ github.run_id }}.nupkg -k ${{ secrets.API_TOKEN }} --skip-duplicate                        
+
+
+       

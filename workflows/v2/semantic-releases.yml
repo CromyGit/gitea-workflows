@@ -1,0 +1,323 @@
+name: Sementic Release
+
+on:
+  pull_request:
+    types: [closed]
+  #push:
+  #  branches-ignore: [ "main" ]
+
+env:
+  ENV_FILE: .github/version.env
+
+jobs:
+
+  determine-version:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        ref: main
+
+    - name: Load current version
+      id: load-version
+      run: |
+        if [ -f "$ENV_FILE" ]; then
+          source $ENV_FILE
+          echo "Current version: $VERSION"
+        else
+          # Datei existiert nicht, also erstellen wir sie
+          echo "Creating $ENV_FILE, as it doesn't exist."
+          touch $ENV_FILE
+          echo "VERSION=0.0.0" > $ENV_FILE
+          source $ENV_FILE
+          echo "Initialized VERSION to 0.0.0"
+        fi
+
+        # Überprüfen, ob die Variable VERSION existiert, wenn nicht, hinzufügen
+        if ! grep -q "^VERSION=" "$ENV_FILE"; then
+          echo "VERSION=0.0.0" >> $ENV_FILE
+          echo "Added VERSION to $ENV_FILE"
+        fi
+        
+        echo "VERSION=$VERSION" >> $GITHUB_ENV
+        echo "PREVIOUS_VERSION=$VERSION" >> $GITHUB_ENV
+
+    - name: Determine new version
+      id: determine-version
+      run: |
+        # Aktuelle Version laden
+        IFS='.' read -r MAJOR MINOR PATCH <<< "${VERSION:-0.0.0}"
+
+        # Typ des Pull Requests analysieren
+        PR_TITLE="${{ github.event.pull_request.title }}"
+        PR_BODY="${{ github.event.pull_request.body }}"
+        
+        echo "PR Title: $PR_TITLE"
+        echo "PR Body: $PR_BODY"
+
+        # Standardmäßig Patch erhöhen
+        NEW_MAJOR=$MAJOR
+        NEW_MINOR=$MINOR
+        NEW_PATCH=$((PATCH + 1))
+
+        # Prüfe, ob der Titel spezifische Schlüsselwörter enthält
+        if [[ "$PR_TITLE" == "breaking-change:"* ]]; then
+          # Breaking Change -> Major erhöhen
+          NEW_MAJOR=$((MAJOR + 1))
+          NEW_MINOR=0
+          NEW_PATCH=0
+          TYPE=breaking-change
+        elif [[ "$PR_TITLE" == "feat:"* ]]; then
+          # Feature -> Minor erhöhen
+          NEW_MINOR=$((MINOR + 1))
+          NEW_PATCH=0
+          TYPE=feat
+        elif [[ "$PR_TITLE" == *"fix:"* ]]; then
+          # Fix -> Patch erhöhen (Standard)
+          NEW_PATCH=$((PATCH + 1))
+          TYPE=fix
+        else
+          echo "WARNING: PR does not specify change type, assuming patch."
+          TYPE=Unknown
+        fi
+
+        # Neue Version zusammenstellen
+        NEW_VERSION="$NEW_MAJOR.$NEW_MINOR.$NEW_PATCH"
+        echo "New version: $NEW_VERSION"
+        echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_ENV
+        echo "Type: $TYPE"
+
+        # Version in ENV-Datei aktualisieren
+        echo "VERSION=$NEW_VERSION" > $ENV_FILE
+        echo "PREVIOUS_VERSION=$PREVIOUS_VERSION" >> $ENV_FILE
+        cat $ENV_FILE                        
+
+    - name: Commit and push updated version
+      run: |
+        git config user.name "${{ github.actor }}"
+        git config user.email "${{ github.actor }}@users.noreply.github.com"
+        git add $ENV_FILE
+        git commit -m "Update version to ${{ env.NEW_VERSION }}"
+        git push origin main                        
+
+  determine-commits:
+    needs: "determine-version"
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        ref: main
+
+    - name: PR Nummer & Branch anzeigen
+      run: |
+        source $ENV_FILE
+        
+        echo "Pull Request Nummer: ${{ github.event.pull_request.number }}"
+        echo "Head-Branch:         ${{ github.event.pull_request.head.ref }}"
+        echo "Repo:                ${{ github.repository }}"
+        echo "Current Version:     $VERSION"  
+
+    - name: Extract all Commits
+      run: |
+        source $ENV_FILE
+
+        AUTH_HEADER="authorization: Basic $(echo -n "${{ secrets.API_USERNAME }}:${{ secrets.API_TOKEN }}" | base64)"
+        PR_BRANCH="${{ github.event.pull_request.number }}"
+
+        RESPONSE=$(curl -s -o response.json -w "%{http_code}" -X 'GET' \
+          "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls/$PR_BRANCH/commits?limit=100&verification=false&files=false" \
+          -H 'accept: application/json' \
+          -H "$AUTH_HEADER")
+
+        # Prüfen des Statuscodes
+        if [ "$RESPONSE" -eq 200 ]; then
+          echo "Successfully  to get commits of the pr($PR_BRANCH)! HTTP Status: $RESPONSE"
+          echo "Response:"
+          cat response.json
+        else
+          echo "Failed to get commits of the pr($PR_BRANCH). HTTP Status: $RESPONSE"
+          echo "Response:"
+          cat response.json
+          exit 1
+        fi
+
+    - name: Install jq (ohne sudo)
+      run: |
+        curl -L -o jq https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64
+        chmod +x ./jq
+
+    - name: Filter commit messages into groups
+      run: |
+        messages=$(./jq -r '.[] | select(.commit.message | test("^(fix:|feat:|breaking-change:)")) | "\(.commit.message | split("\n")[0]) (\(.html_url))"' response.json)
+
+        fix_msgs=()
+        feat_msgs=()
+        breaking_msgs=()
+
+        while IFS= read -r line; do
+          case "$line" in
+            fix:*) 
+              clean_msg=$(echo "$line" | sed 's/^fix:[ ]*//')
+              fix_msgs+=("$clean_msg")
+              ;;
+            feat:*) 
+              clean_msg=$(echo "$line" | sed 's/^feat:[ ]*//')
+              feat_msgs+=("$clean_msg")
+              ;;
+            breaking-change:*) 
+              clean_msg=$(echo "$line" | sed 's/^breaking-change:[ ]*//')
+              breaking_msgs+=("$clean_msg")
+              ;;
+          esac
+        done <<< "$messages"
+
+        echo "-------------------------------------------"
+        # Ausgabe (zur Kontrolle)
+        echo "Fix messages:"
+        printf '%s\n' "${fix_msgs[@]}"
+        echo "-------------------------------------------"
+        echo "Feat messages:"
+        printf '%s\n' "${feat_msgs[@]}"
+        echo "-------------------------------------------"
+        echo "Breaking-change messages:"
+        printf '%s\n' "${breaking_msgs[@]}"
+        echo "-------------------------------------------"
+
+    - name: Create changelog.md if missing
+      run: |
+        # Prüfen, ob changelog.md existiert
+        if [ ! -f changelog.md ]; then
+          echo "🔧 changelog.md nicht gefunden – wird erstellt."
+          echo "Initialisiert von CI-Workflow am $(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> changelog.md
+
+          git add changelog.md
+        else
+          echo "✅ changelog.md existiert bereits – kein Commit notwendig."
+        fi
+
+    - name: Fit changelog.md with content
+      run: |
+        source $ENV_FILE
+
+        messages=$(./jq -r '.[] | select(.commit.message | test("^(fix:|feat:|breaking-change:)")) | "\(.commit.message | split("\n")[0]) (\(.html_url))"' response.json)
+
+        fix_msgs=()
+        feat_msgs=()
+        breaking_msgs=()
+
+        while IFS= read -r line; do
+          case "$line" in
+            fix:*) 
+              clean_msg=$(echo "$line" | sed 's/^fix:[ ]*//')
+              fix_msgs+=("$clean_msg")
+              ;;
+            hotfix:*) 
+              clean_msg=$(echo "$line" | sed 's/^hotfix:[ ]*//')
+              fix_msgs+=("$clean_msg")
+              ;;
+            feat:*) 
+              clean_msg=$(echo "$line" | sed 's/^feat:[ ]*//')
+              feat_msgs+=("$clean_msg")
+              ;;
+            breaking-change:*) 
+              clean_msg=$(echo "$line" | sed 's/^breaking-change:[ ]*//')
+              breaking_msgs+=("$clean_msg")
+              ;;
+          esac
+        done <<< "$messages"
+
+        if [ ${#fix_msgs[@]} -gt 0 ]; then
+          {
+            echo "### Bug Fixes"
+            for f in "${fix_msgs[@]}"; do
+              echo "* $f"
+            done
+            echo ""
+          } > temp_fixes.md
+
+          cat temp_fixes.md changelog.md > changelog.new.md && mv changelog.new.md changelog.md
+        fi
+
+        if [ ${#feat_msgs[@]} -gt 0 ]; then
+          {
+            echo "### Features"
+            for f in "${feat_msgs[@]}"; do
+              echo "* $f"
+            done
+            echo ""
+          } > temp_features.md
+
+          cat temp_features.md changelog.md > changelog.new.md && mv changelog.new.md changelog.md
+        fi
+
+        if [ ${#breaking_msgs[@]} -gt 0 ]; then
+          {
+            echo "### BREAKING-CHANGES"
+            for f in "${breaking_msgs[@]}"; do
+              echo "* $f"
+            done
+            echo ""
+          } > temp_breakingchanges.md
+
+          cat temp_breakingchanges.md changelog.md > changelog.new.md && mv changelog.new.md changelog.md
+        fi
+
+        REPO="${{ github.repository }}"
+        TODAY=$(date +"%Y-%m-%d")
+
+        sed -i "1i # [$VERSION]($GITHUB_SERVER_URL/$REPO/compare/$PREVIOUS_VERSION...main) ($TODAY)\n" changelog.md
+
+        echo "Changelog File:"
+        echo "-------------------------------------------"
+        cat changelog.md
+
+    - name: Commit and push changelog.md
+      run: |
+        source $ENV_FILE
+
+        git config user.name "${{ github.actor }}"
+        git config user.email "${{ github.actor }}@users.noreply.github.com"
+        git add changelog.md
+        git commit -m "Update version to $VERSION from $PREVIOUS_VERSION with changelog.md"
+        git push origin main           
+
+  create-tag:
+    runs-on: "ubuntu-latest"
+    needs: "determine-commits"
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        ref: main
+
+    - name: Create and push new tag
+      run: |
+        source $ENV_FILE
+        
+        AUTH_HEADER="authorization: Basic $(echo -n "${{ secrets.API_USERNAME }}:${{ secrets.API_TOKEN }}" | base64)"
+
+        RESPONSE=$(curl -s -o response.json -w "%{http_code}" -X 'POST' \
+          "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/tags" \
+          -H 'accept: application/json' \
+          -H "$AUTH_HEADER" \
+          -H 'Content-Type: application/json' \
+          -d "{\"message\": \"Created by ${{ github.actor }}\",\"tag_name\": \"${VERSION}\",\"target\": \"main\"}")
+
+        # Prüfen des Statuscodes
+        if [ "$RESPONSE" -eq 201 ]; then
+          echo "Tag successfully created! HTTP Status: $RESPONSE"
+          echo "Response:"
+          cat response.json
+        else
+          echo "Failed to create tag. HTTP Status: $RESPONSE"
+          echo "Response:"
+          cat response.json
+          exit 1
+        fi
+                                      
+

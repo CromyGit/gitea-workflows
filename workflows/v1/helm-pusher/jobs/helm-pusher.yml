@@ -1,0 +1,96 @@
+name: Helm Pusher Workflow
+
+#Upload Nuget Package to Package Source
+
+on:
+  workflow_call:
+    inputs:
+      path:
+        required: true
+        type: string
+      prefix:
+        required: false
+        type: string
+      release-name:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      helm-source:
+        required: true
+        type: string
+      api-username:
+        required: true
+        type: string
+      api-token:
+        required: true
+        type: string
+
+jobs:
+
+  process-folders:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Install Helm
+      run: |
+        # Download and install Helm
+        curl https://baltocdn.com/helm/signing.asc | gpg --dearmor | sudo tee /usr/share/keyrings/helm.gpg > /dev/null
+        sudo apt-get install apt-transport-https --yes
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/helm.gpg] https://baltocdn.com/helm/stable/debian/ all main" | sudo tee /etc/apt/sources.list.d/helm-stable-debian.list
+        sudo apt-get update
+        sudo apt-get install helm
+        helm plugin install https://github.com/chartmuseum/helm-push
+        helm plugin install https://github.com/vetyy/helm-ecr.git                        
+
+    - name: Verify Helm installation
+      run: |
+        helm version
+        helm repo add stable https://charts.helm.sh/stable
+        helm repo update                             
+
+    - name: Install yq
+      run: |
+        sudo apt-get install -y jq
+        curl -sL https://github.com/mikefarah/yq/releases/download/v4.30.5/yq_linux_amd64 -o /usr/bin/yq
+        chmod +x /usr/bin/yq                      
+
+    - name: Use Helm
+      run: helm repo add Shared ${{ inputs.helm-source }} --username ${{ inputs.api-username }} --password ${{ inputs.api-token }}
+
+    - name: List current directory contents
+      run: |
+        echo "Listing contents of the current directory:"
+        ls -l ${{ inputs.path }}                     
+
+    - name: List directories and process them
+      run: |
+        NEW_VERSION="${{ inputs.prefix }}${{ inputs.version }}-${{ inputs.release-name}}"
+        NEW_APP_VERSION="${{ inputs.version }}"
+
+        PATH_TO_SEARCH=${{ inputs.path }}
+        # Extrahiere die Ordnernamen aus dem Pfad
+        directories=$(find "$PATH_TO_SEARCH" -mindepth 1 -maxdepth 1 -type d -exec basename {} \;)
+        
+        # Iteriere über die Ordnernamen
+        for dir in $directories; do
+          echo "Verarbeite Ordner: $dir"
+          # Füge hier deine gewünschte Verarbeitung des Ordners ein
+          # Zum Beispiel könntest du ein Skript ausführen oder eine andere Aktion durchführen
+          echo "---------------------------------------------------------------------------------------"
+          echo "Processing directory: $dir"
+          # Add your directory-specific logic here
+          # For example: run a script or command for each directory
+          yq e ".version = \"$NEW_VERSION\" | .appVersion = \"$NEW_APP_VERSION\"" -i ${{ inputs.path }}/$dir/Chart.yaml
+          cat ${{ inputs.path }}/$dir/Chart.yaml
+
+          helm package ${{ inputs.path }}/$dir --app-version "$NEW_VERSION" --debug
+          helm cm-push ./$dir-$NEW_VERSION.tgz Shared
+          echo "---------------------------------------------------------------------------------------"
+        done
+                                      
+    

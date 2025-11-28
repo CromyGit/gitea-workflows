@@ -1,0 +1,46 @@
+name: Tag
+
+#Upload Nuget Package to Package Source
+
+on:
+  push:
+    tags:
+      - 'v*.*.*' # Dieser Workflow wird nur bei Tags, die mit 'v' beginnen, ausgeführt
+
+env:
+  ENV_FILE: .github/config.env
+
+jobs:
+      
+  set-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.set-version.outputs.version }}
+    steps:
+    - uses: actions/checkout@v4
+    - id: set-version # important for output, need same name 
+      run: |
+        source $ENV_FILE
+        # Extrahiere das Git-Tag
+        TAG=$(git describe --tags --abbrev=0)
+
+        NEW_APP_VERSION="${TAG#v}"
+        echo "version=$NEW_APP_VERSION" >> $GITHUB_OUTPUT        
+      
+  get-version:
+    needs: set-version
+    runs-on: ubuntu-latest
+    steps:
+    - run: echo ${{ needs.set-version.outputs.version }}
+      
+  call-workflow-in-local-repo:
+    uses: ./.github/workflows/jobs/create-package-helm.yml
+    needs: set-version
+    with:
+      prefix: ${{ vars.PREFIX }}
+      version: ${{ needs.set-version.outputs.version }}
+      helm-source: ${{ secrets.HELM_SOURCE }}
+      api-username: ${{ secrets.API_USERNAME }}
+      api-token: ${{ secrets.API_TOKEN }}
+      path: ${{ vars.PATH }}
+      release-name: "release"

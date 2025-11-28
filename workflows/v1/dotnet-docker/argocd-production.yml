@@ -1,0 +1,80 @@
+name: Docker Dotnet Workflow Production
+
+on:
+  push:
+    # Pattern matched against refs/tags
+    tags:
+      - '*.*.*'     # Push events to every tag not containing /
+
+env:
+  ENV_FILE: .github/config.env
+jobs:
+
+  docker-build:
+    runs-on: ubuntu-docker
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: script
+        id: script
+        run: |
+          source $ENV_FILE
+          PROJECT_PATH=$PROJECT_PATH
+          echo "project_path=${PROJECT_PATH}" >> "$GITHUB_OUTPUT"                    
+
+      - name: install package
+        run: dotnet nuget add source --name Shared -u ${{ secrets.API_USERNAME }} -p ${{ secrets.API_TOKEN }} ${{ secrets.API_SOURCE }} --store-password-in-clear-text
+
+      - run: |
+          source $ENV_FILE
+          dotnet restore ./$CS_PROJECT_PATH                      
+
+      - name: Publish
+        run: |
+          source $ENV_FILE
+          dotnet publish ./$CS_PROJECT_PATH -c Release -o ./publish /p:UseAppHost=false --no-restore                    
+
+      # Install QEMU-based emulator
+      # - name: Install QEMU
+      #   run: apt-get update && apt-get install -y qemu-user-static
+      # - name: Set up Docker Buildx
+      #   uses: docker/setup-buildx-action@v3
+      
+      - name: Extract Build Tag
+        id: build-version
+        run: |
+            BRANCH=${GITHUB_REF_NAME////-}
+            REPONAME=$(echo "${GITHUB_REPOSITORY##*/}" | tr '[:upper:]' '[:lower:]')
+            COMBINED=${REPONAME}-${BRANCH}
+            TRIMMED_COMBINED=${COMBINED:0:24} # Default Max Length 24
+            DOCKER_TAG=${TRIMMED_COMBINED}-${{ gitea.run_id }}
+            echo "${DOCKER_TAG}"
+            echo "docker_tag=${DOCKER_TAG}" >> "$GITHUB_OUTPUT"
+
+      # default host docker.io
+      - name: Login Docker
+        run: docker login ${{ secrets.DOCKERHUB_HOST }} -u ${{ secrets.DOCKERHUB_USERNAME }} -p ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build Docker
+        env:
+          TAG: ${{steps.build-version.outputs.docker_tag}}
+        run: |
+            source $ENV_FILE
+            docker build -t "${{ secrets.DOCKERHUB_REPO }}:${TAG}" . \
+            --build-arg BUILD_TAG="${TAG}" \
+            --build-arg APPLICATION_DLL_ARG=$DLL_NAME \
+            --build-arg CI_COMMIT_AUTHOR=${GITHUB_ACTOR} \
+            --build-arg CI_PIPELINE_CREATED_AT=$(date -u +'%Y-%m-%dT%H:%M:%SZ')                        
+
+      - name: Push Docker
+        env:
+          TAG: ${{steps.build-version.outputs.docker_tag}}
+        run: docker push "${{ secrets.DOCKERHUB_REPO }}:${TAG}"
+
+  call-workflow-publish:
+    uses: ./.github/workflows/Jobs/publish-workflow.yml
+    needs: [docker-build]
+    secrets: inherit
+    with: 
+      environment: "production"

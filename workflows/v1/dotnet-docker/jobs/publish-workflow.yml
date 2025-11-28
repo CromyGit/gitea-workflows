@@ -1,0 +1,83 @@
+name: Publish Docker Workflow
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+    secrets:
+      GIT_SOURCE:
+        required: true
+      GIT_USERNAME:
+        required: true
+      GIT_PASSWORD:
+        required: true
+
+jobs:
+
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      BRNACH: ${{ github.ref_name }}
+      
+    steps:
+      - name: Shell-Script
+        id: script
+        run: |
+          BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          BUILD_DATE_NUMERIC="${BUILD_DATE//[^[:digit:]]/}"
+          GIT_URL=$(echo "${GITHUB_SERVER_URL}" | awk -F/ '{print $3}' | sed 's/\/*$//')
+          GIT_REPO=${GITHUB_REPOSITORY,,}
+          GIT_REPO_SHORT=${GIT_REPO#*/}
+          GIT_REPO_SHORT=${GIT_REPO_SHORT#"docker-"@L}
+          RUN_ID=${{ gitea.run_id }}
+
+          # Extract the last part after "/"
+          BRANCH=${GITHUB_REF_NAME////-}
+          REPONAME=$(echo "${GITHUB_REPOSITORY##*/}" | tr '[:upper:]' '[:lower:]')
+          COMBINED=${REPONAME}-${BRANCH}
+          TRIMMED_COMBINED=${COMBINED:0:24} # Default Max Length 24
+          DOCKER_TAG=${TRIMMED_COMBINED}-${{ gitea.run_id }}
+          echo "Docker Tag Version: ${DOCKER_TAG}"
+          echo "docker_tag=${DOCKER_TAG}" >> "$GITHUB_OUTPUT"
+
+          echo "ENVs: BUILD_DATE=${BUILD_DATE}, BUILD_DATE_NUMERIC=${BUILD_DATE_NUMERIC}, COMMIT_HASH=${COMMIT_HASH}, GIT_URL=${GIT_URL}, GIT_REPO=${GIT_REPO}"
+          # echo "ENVs (by Git) for Owner: GITHUB_REPOSITORY_OWNER=${GITHUB_REPOSITORY_OWNER} and github.repository_owner=${{ github.repository_owner }} are the same!"
+          
+          # Set output parameters to action.
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "build_date=${BUILD_DATE}" >> "$GITHUB_OUTPUT"
+          echo "build_date_numeric=${BUILD_DATE_NUMERIC}" >> "$GITHUB_OUTPUT"
+          echo "git_url=${GIT_URL}" >> "$GITHUB_OUTPUT"
+          echo "git_repo=${GIT_REPO}" >> "$GITHUB_OUTPUT"
+          echo "git_repo_short=${GIT_REPO_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "docker_tag=${DOCKER_TAG}" >> "$GITHUB_OUTPUT"                              
+
+      - uses: actions/checkout@v4
+        name: changing git repo of ${{ secrets.GIT_SOURCE }}
+        with:
+          repository: ${{ secrets.GIT_SOURCE }}
+          fetch-depth: '0'
+          token: ${{ secrets.GIT_PASSWORD }}
+          ref: main
+
+      - name: modify the image
+        run: |
+          git config user.email "${GIT_USERNAME}@users.noreply.github.com"
+          git config user.name ${GITHUB_ACTOR}
+          pwd
+          cat ${{ inputs.environment }}/${PROJECT_NAME}/values.yaml
+          pwd
+          sed -i "s/tag: \"[^\\\"]*\"/tag: \"${TAG}\"/g" ${{ inputs.environment }}/${PROJECT_NAME}/values.yaml
+          cat ${{ inputs.environment }}/${PROJECT_NAME}/values.yaml
+          git add .
+          git commit -m 'Done by Github Actions Job changemanifest Application ${{ github.repository }} - ${{ env.BRANCH }} by RUN_ID: ${{ github.run_id }}'
+          git push origin main                                                  
+        env:
+          GIT_USERNAME: ${{ secrets.GIT_USERNAME }}
+          GIT_PASSWORD: ${{ secrets.GIT_PASSWORD }}
+          RUN_NUMBER: ${{steps.script.outputs.build_date_numeric}}
+          TAG: ${{steps.script.outputs.docker_tag}}
+          PROJECT_NAME: ${{steps.script.outputs.git_repo_short}}
+       
